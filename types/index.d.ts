@@ -13,6 +13,8 @@ export type AgentRow = {
   todos: AgentTodo[]
   startedAt: number
   endedAt?: number
+  // Fortgesetzter Agent: Seine Laufzeit sagt nichts über einen neuen Lauf, sie wird nicht gelernt.
+  isResumed?: boolean
 }
 
 declare module 'claude-code' {

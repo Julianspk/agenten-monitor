@@ -19,6 +19,7 @@ const USAGE = { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 
 test('Pane zeigt Modell, Fortschritt, Laufzeit und verständliche Zeilen je Agent', async ($, on) => {
   // Diese Hooks stehen für die Engine unter der Mod.
   const clock = mock.clock(on)
+  mock.store(on)
   let spawnPrompt = ''
   on('command.register', () => ({ value: { command: 'agenten' } }))
   on('tool.register', () => ({ value: { tool: 'mcp__agenten-monitor__fortschritt' } }))
@@ -49,6 +50,9 @@ test('Pane zeigt Modell, Fortschritt, Laufzeit und verständliche Zeilen je Agen
     expect(await ui.find({ type: 'Text', text: /1:23/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /Bash: Kurz warten$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /geschätzt/ })).toBeDefined()
+    // Ohne frühere Läufe gibt es keine Restzeit.
+    expect(await ui.find({ type: 'Text', text: /Dauer lernt noch/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /noch ~/ })).toBeUndefined()
     await ui.unmount()
   }
 
@@ -67,5 +71,44 @@ test('Pane zeigt Modell, Fortschritt, Laufzeit und verständliche Zeilen je Agen
   expect(await ui.find({ type: 'Text', text: /100 %/ })).toBeDefined()
   // Die Laufzeit bleibt nach dem Ende stehen.
   expect(await ui.find({ type: 'Text', text: /1:23/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('Restzeit aus früheren Läufen desselben Typs, jeder fertige Lauf wird gelernt', async ($, on) => {
+  const clock = mock.clock(on)
+  // Drei frühere Explore-Läufe mit Haiku: üblich sind 2:00.
+  mock.store(on, { laeufe: { Explore: [100_000, 120_000, 140_000].map(ms => ({ ms, model: 'Haiku 4.5' })) } })
+  let spawned = 0
+  on('command.register', () => ({ value: { command: 'agenten' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__agenten-monitor__fortschritt' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('agent.spawn', () => ({ model: 'claude-haiku-4-5-20251001', agentId: `a${++spawned}` }))
+  on('tool.call', () => ({ result: {} }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  const loose = $ as unknown as { tool: { call: (e: unknown) => Promise<unknown> } }
+  const spawn = () => $.agent.spawn({ prompt: 'Such', description: 'Suchen', subagentType: 'Explore' } as never)
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await spawn()
+  await clock.advance(20_000)
+  let ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /noch ~1:40/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Dauer aus 3 Läufen/ })).toBeDefined()
+  await ui.unmount()
+
+  // Nach 0:20 halb fertig: Das schnelle Tempo zieht die Restzeit unter die übliche.
+  await loose.tool.call({ tool: 'mcp__agenten-monitor__fortschritt', agentId: 'a1', erledigt: 1, gesamt: 2, schritt: 'Prüfen' })
+  ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /noch ~0:40/ })).toBeDefined()
+  await ui.unmount()
+
+  // Der Lauf endet nach 0:50 und zählt beim nächsten Agenten mit: Üblich sind jetzt 1:40 statt 2:00.
+  await clock.advance(30_000)
+  await $.turn.complete({ agentId: 'a1', answer: 'ok', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await spawn()
+  ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /Dauer aus 4 Läufen/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /noch ~1:40/ })).toBeDefined()
   await ui.unmount()
 })
