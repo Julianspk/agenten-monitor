@@ -1,0 +1,5 @@
+{
+  "name": "agenten-monitor",
+  "owner": { "name": "Julianspk" },
+  "plugins": [{ "name": "agenten-monitor", "source": "./" }]
+}

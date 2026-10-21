@@ -1,0 +1,6 @@
+{
+  "name": "agenten-monitor",
+  "version": "0.1.0",
+  "description": "Zeigt je Subagent eine Fortschrittsleiste und die aktuelle Aufgabe in einem Pane",
+  "types": "./types/index.d.ts"
+}
