@@ -8,6 +8,14 @@ const TITLE = 'Agenten'
 const FORTSCHRITT = 'mcp__agenten-monitor__fortschritt'
 const agents = atom({ plugin: 'agenten-monitor', key: 'agents' } as const, [])
 
+// Dauer bisheriger Läufe je Agententyp, über Sessions hinweg in $.store; je Typ die letzten KEEP.
+type Run = { ms: number; model: string }
+const RUNS = 'laeufe'
+const KEEP = 40
+// Gewicht der gelernten Dauer neben gemeldetem Fortschritt, gemessen in Läufen.
+const PRIOR = 0.5
+let history: Record<string, Run[]> = {}
+
 // Wird an den Auftrag jedes neuen Subagenten angehängt.
 const HINT = `
 
@@ -89,18 +97,50 @@ function summarize(e: ToolCallInput): string {
 }
 
 // Fortschritt: gemeldet über das Werkzeug, sonst aus der Todo-Liste, sonst geschätzt.
-function progress(row: AgentRow): { ratio: number; label: string } {
-  if (row.status === 'done') return { ratio: 1, label: 'abgeschlossen' }
-  if (row.goal !== undefined) return { ratio: row.goal.done / row.goal.total, label: `${row.goal.done}/${row.goal.total} Schritte` }
+function progress(row: AgentRow, typical: number | undefined, ms: number): { ratio: number; label: string; isMeasured: boolean } {
+  if (row.status === 'done') return { ratio: 1, label: 'abgeschlossen', isMeasured: true }
+  if (row.goal !== undefined) {
+    return { ratio: row.goal.done / row.goal.total, label: `${row.goal.done}/${row.goal.total} Schritte`, isMeasured: true }
+  }
   const total = row.todos.length
   if (total > 0) {
     const done = row.todos.filter(todo => todo.isDone).length
 
-    return { ratio: done / total, label: `${done}/${total} Aufgaben` }
+    return { ratio: done / total, label: `${done}/${total} Aufgaben`, isMeasured: true }
   }
+  // Mit gelernter Dauer: Anteil der üblichen Laufzeit (max. 95 %).
+  if (typical !== undefined) return { ratio: Math.min(0.95, ms / typical), label: 'geschätzt', isMeasured: false }
 
-  // ponytail: Schätzung aus der Zahl der Tool-Aufrufe (max. 90 %), genau nur mit gemeldetem Fortschritt
-  return { ratio: Math.min(0.9, row.steps / (row.steps + 10)), label: 'geschätzt' }
+  // ponytail: Schätzung aus der Zahl der Tool-Aufrufe (max. 90 %), bis es gelernte Dauern gibt
+  return { ratio: Math.min(0.9, row.steps / (row.steps + 10)), label: 'geschätzt', isMeasured: false }
+}
+
+// Bisherige Dauern desselben Typs, nur die mit demselben Modell, sobald es davon drei gibt.
+function pastDurations(row: AgentRow): number[] {
+  const all = history[row.type] ?? []
+  const same = all.filter(run => run.model === modelName(row.model))
+
+  return (same.length >= 3 ? same : all).map(run => run.ms)
+}
+
+// Median: übliche Dauer, unempfindlich gegen einzelne Ausreißer.
+function median(values: number[]): number | undefined {
+  return [...values].sort((a, b) => a - b)[Math.floor((values.length - 1) / 2)]
+}
+
+// Restzeit in ms. Mit gemeldetem Fortschritt aus dem Tempo des Agenten, in dem die gelernte Dauer
+// wie PRIOR Läufe mitzählt; ohne ihn die gelernte Dauer minus Laufzeit. Kann negativ werden.
+function remaining(isMeasured: boolean, ratio: number, typical: number | undefined, ms: number): number | undefined {
+  if (!isMeasured) return typical === undefined ? undefined : typical - ms
+  const prior = typical === undefined ? 0 : PRIOR
+  if (prior + ratio === 0) return undefined
+
+  return ((prior * (typical ?? 0) + ms) / (prior + ratio)) * (1 - ratio)
+}
+
+// Liest die gelernten Läufe aus $.store; fehlt der Eintrag oder ist er kaputt, gibt es noch keine.
+function asRuns(stored: unknown): Record<string, Run[]> {
+  return typeof stored === 'object' && stored !== null && !Array.isArray(stored) ? stored as Record<string, Run[]> : {}
 }
 
 // Laufzeit als m:ss bzw. h:mm:ss.
@@ -150,6 +190,7 @@ export const register: Register = on => {
         if (list.some(row => row.status === 'running')) $.ui.invalidate('ui.render')
       })
     })
+    history = asRuns(await $.store.get(RUNS).catch(() => undefined))
 
     return next(e)
   })
@@ -173,6 +214,7 @@ export const register: Register = on => {
         steps: 0,
         todos: [],
         startedAt: await $.clock.now(),
+        isResumed: e.resume !== undefined,
       }
       await update($, agents, list => [...list.filter(one => one.id !== row.id), row].slice(-20))
       void $.ui.open({ id: PANE, title: TITLE })
@@ -183,7 +225,12 @@ export const register: Register = on => {
 
   on('turn.start', async ($, e, next) => {
     if (e.agentId !== undefined) {
-      await update($, agents, patch(e.agentId, row => ({ ...row, status: 'running', endedAt: undefined })))
+      await update($, agents, patch(e.agentId, row => ({
+        ...row,
+        status: 'running',
+        endedAt: undefined,
+        isResumed: row.isResumed === true || row.endedAt !== undefined,
+      })))
     }
 
     return next(e)
@@ -193,12 +240,21 @@ export const register: Register = on => {
     const isDone = e.reason === 'answer'
     if (e.agentId !== undefined) {
       const endedAt = await $.clock.now()
-      await update($, agents, patch(e.agentId, row => ({
-        ...row,
+      const row = (await read($, agents)).find(one => one.id === e.agentId)
+      await update($, agents, patch(e.agentId, one => ({
+        ...one,
         status: isDone ? 'done' : 'failed',
         activity: isDone ? 'Ergebnis übergeben' : `Beendet: ${e.reason}`,
         endedAt,
       })))
+      // Nur erfolgreiche Erstläufe lernen: Eine Fortsetzung ist Nacharbeit oder enthält die Pause davor.
+      if (isDone && row?.status === 'running' && row.isResumed !== true) {
+        const run: Run = { ms: endedAt - row.startedAt, model: modelName(row.model) }
+        // ponytail: get und set sind nicht atomar, enden zwei Sessions gleichzeitig, fehlt ein Lauf
+        const latest = asRuns(await $.store.get(RUNS).catch(() => undefined))
+        history = { ...latest, [row.type]: [...(latest[row.type] ?? []), run].slice(-KEEP) }
+        await $.store.set(RUNS, history).catch(() => undefined)
+      }
     }
 
     return next(e)
@@ -307,7 +363,17 @@ export const register: Register = on => {
         {sorted.map(row => {
           const look = LOOK[row.status]
           const isRunning = row.status === 'running'
-          const { ratio, label } = progress(row)
+          const ms = (row.endedAt ?? now) - row.startedAt
+          const past = pastDurations(row)
+          const typical = median(past)
+          const { ratio, label, isMeasured } = progress(row, typical, ms)
+          const rest = isRunning ? remaining(isMeasured, ratio, typical, ms) : undefined
+          const eta = rest === undefined
+            ? ''
+            : rest > 0
+              ? `  ·  noch ~${elapsed(Math.ceil(rest / 5000) * 5000)}`
+              : ratio >= 1 ? '  ·  gleich fertig' : '  ·  länger als üblich'
+          const learned = past.length === 0 ? 'Dauer lernt noch' : `Dauer aus ${past.length} ${past.length === 1 ? 'Lauf' : 'Läufen'}`
           const pct = `${Math.round(ratio * 100)} %`
           const barWidth = Math.max(8, inner - pct.length - 1)
           const full = Math.floor(ratio * barWidth)
@@ -315,7 +381,7 @@ export const register: Register = on => {
           const cut = row.activity.indexOf(': ')
           const tool = cut < 0 ? '' : row.activity.slice(0, cut)
           const what = cut < 0 ? row.activity : row.activity.slice(cut + 2)
-          const meta = [row.type, label, `${row.steps} Tool-Aufrufe`].join('  ·  ')
+          const meta = [row.type, label, `${row.steps} Tool-Aufrufe`, ...(isRunning ? [learned] : [])].join('  ·  ')
 
           return (
             <Box
@@ -330,7 +396,7 @@ export const register: Register = on => {
                 <Text weight="semibold" wrap="truncate-end">
                   <Text color={look.color}>{look.glyph}</Text> {row.description}
                 </Text>
-                <Text dimColor tabular>{elapsed((row.endedAt ?? now) - row.startedAt)}</Text>
+                <Text dimColor tabular>{elapsed(ms)}{eta}</Text>
               </Box>
               <Box flexDirection="row" alignItems="center" gap={1}>
                 {Svg !== undefined

@@ -1,6 +1,6 @@
 # agenten-monitor
 
-Eine Mod für Claude Code, die in einem Pane zeigt, woran die Agenten einer Session gerade arbeiten. Statt auf ein stummes „Agent läuft“ zu warten, siehst du je Agent eine Fortschrittsleiste, den aktuellen Schritt und den letzten Tool-Aufruf.
+Eine Mod für Claude Code, die in einem Pane zeigt, woran die Agenten einer Session gerade arbeiten. Statt auf ein stummes „Agent läuft“ zu warten, siehst du je Agent eine Fortschrittsleiste, den aktuellen Schritt, den letzten Tool-Aufruf und wie lange er voraussichtlich noch braucht. Die Restzeit lernt die Mod aus früheren Läufen, sie wird mit der Zeit genauer.
 
 ## Voraussetzungen
 
@@ -39,11 +39,11 @@ Aufbau einer Karte:
 
 | Zeile | Inhalt | Beispiel |
 | --- | --- | --- |
-| Kopf | Status, Aufgabe des Agenten, Laufzeit | `● Doku lesen   1:23` |
+| Kopf | Status, Aufgabe des Agenten, Laufzeit, geschätzte Restzeit | `● Doku lesen   1:23 · noch ~0:40` |
 | Leiste | Fortschritt in Prozent | `40 %` |
 | Schritt | aktueller Schritt, vom Agenten gemeldet oder aus seiner Todo-Liste | `› Tests ausführen` |
 | Aktivität | letzter Tool-Aufruf als verständliche Zeile | `Read: app.ts lesen` |
-| Fußzeile | Modell, Agententyp, Quelle des Fortschritts, Zahl der Tool-Aufrufe | `Haiku 4.5 · Explore · 2/5 Schritte · 3 Tool-Aufrufe` |
+| Fußzeile | Modell, Agententyp, Quelle des Fortschritts, Zahl der Tool-Aufrufe, solange er läuft auch die Grundlage der Restzeit | `Haiku 4.5 · Explore · 2/5 Schritte · 3 Tool-Aufrufe · Dauer aus 12 Läufen` |
 
 Status und Farben:
 
@@ -71,7 +71,7 @@ Einen Befehl zum Pausieren gibt es nicht. Das Pane kannst du jederzeit schließe
 
 1. Meldet der Agent seinen Fortschritt über das Werkzeug `fortschritt` (siehe unten), ist die Leiste exakt. Die Fußzeile zeigt dann zum Beispiel `2/5 Schritte`.
 2. Sonst zählt die Todo-Liste des Agenten, wenn er eine führt (`TodoWrite` oder `TaskCreate` und `TaskUpdate`). Die Fußzeile zeigt dann zum Beispiel `3/7 Aufgaben`.
-3. Sonst wird geschätzt: Je mehr Tool-Aufrufe, desto voller die Leiste, höchstens bis 90 %. Die Fußzeile zeigt `geschätzt`.
+3. Sonst wird geschätzt. Kennt die Mod die übliche Dauer des Agententyps (siehe unten), zeigt die Leiste den Anteil davon, der schon vergangen ist, höchstens 95 %. Sonst gilt: Je mehr Tool-Aufrufe, desto voller die Leiste, höchstens bis 90 %. Die Fußzeile zeigt in beiden Fällen `geschätzt`.
 4. Ist der Agent fertig, steht die Leiste auf 100 % und die Fußzeile auf `abgeschlossen`.
 
 Damit Agenten ihren Fortschritt tatsächlich melden, hängt die Mod an den Auftrag jedes neuen Agenten einen kurzen Hinweis an. Er bittet den Agenten, `fortschritt` am Anfang mit seinem Plan und danach bei jedem Schritt aufzurufen, und Shell-Befehlen eine kurze deutsche Beschreibung mitzugeben. Fortgesetzte Agenten bekommen den Hinweis nicht noch einmal.
@@ -90,6 +90,19 @@ Die Mod stellt jedem Agenten das Werkzeug `mcp__agenten-monitor__fortschritt` be
 
 Das Werkzeug hat keine Nebenwirkungen. Ruft die Hauptsession es auf, ändert sich nichts.
 
+## Wie die Restzeit entsteht
+
+Die Mod lernt aus jedem Agenten, der sein Ergebnis übergibt: Sie merkt sich seine Laufzeit, getrennt nach Agententyp wie `Explore`, und behält je Typ die letzten 40 Läufe. Gespeichert wird im eigenen Speicher der Mod, der über Sessions hinweg bleibt. Abgebrochene Agenten zählen nicht, ebenso wenig fortgesetzte, deren Laufzeit eine Pause enthält.
+
+Aus diesen Läufen ergibt sich die übliche Dauer, der Median: Einzelne Ausreißer verschieben ihn kaum. Gibt es mindestens drei Läufe desselben Typs mit demselben Modell, zählen nur diese, sonst alle Läufe des Typs.
+
+1. Meldet der Agent Fortschritt oder führt er eine Todo-Liste, wird die Restzeit aus seinem Tempo hochgerechnet. Die übliche Dauer zählt dabei wie ein halber Lauf mit: Anfangs bestimmt sie die Schätzung, mit wachsendem Fortschritt mehr und mehr das tatsächliche Tempo.
+2. Sonst ist die Restzeit die übliche Dauer abzüglich der bisherigen Laufzeit.
+3. Ist die übliche Dauer überschritten, steht dort `länger als üblich`. Sind alle gemeldeten Schritte erledigt, steht dort `gleich fertig`.
+4. Ohne frühere Läufe und ohne gemeldeten Fortschritt gibt es keine Restzeit. Die Fußzeile zeigt dann `Dauer lernt noch`, sonst wie viele Läufe die Schätzung trägt, etwa `Dauer aus 12 Läufen`.
+
+Die Restzeit wird auf 5 Sekunden aufgerundet. Je mehr Läufe eines Typs gelernt sind, desto verlässlicher wird die übliche Dauer. Weil nur die letzten 40 zählen, passt sie sich an, wenn Agenten eines Typs schneller oder langsamer werden.
+
 ## Optionen
 
 Die Mod hat keine Optionen.
@@ -101,6 +114,8 @@ Die Mod hat keine Optionen.
 - Jeder Shell-Befehl ohne Beschreibung kostet einen kurzen Haiku-Aufruf.
 - Das Werkzeug `fortschritt` steht auch in der Hauptsession im Werkzeugkatalog, obwohl es dort nichts bewirkt.
 - Das Pane hält die letzten 20 Agenten der Session, ältere fallen heraus.
+- Die Restzeit bleibt eine Schätzung. Agenten desselben Typs bekommen oft sehr verschiedene Aufträge; dann sagt die übliche Dauer wenig über den einzelnen Lauf, gemeldeter Fortschritt hilft mehr.
+- Enden Agenten in zwei Sessions im selben Moment, kann einer der beiden Läufe beim Lernen verloren gehen.
 
 ## Entwicklung
 
