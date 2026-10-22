@@ -74,6 +74,33 @@ test('Pane zeigt Modell, Fortschritt, Laufzeit und verständliche Zeilen je Agen
   await ui.unmount()
 })
 
+test('Pane zeigt das Modell, das wirklich geantwortet hat, nicht das beim Start genannte', async ($, on) => {
+  mock.clock(on)
+  mock.store(on)
+  on('command.register', () => ({ value: { command: 'agenten' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__agenten-monitor__fortschritt' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: 'a1' }))
+  // Ein Router unter der Mod hat den Schritt auf Sonnet umgeleitet.
+  on('turn.step', async function* (_, e) {
+    return {
+      turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn',
+      usage: { ...USAGE, model: 'claude-sonnet-5-5' },
+    } as never
+  })
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.agent.spawn({ prompt: 'Plane', description: 'Planen', subagentType: 'dev-team:planer' } as never)
+  const step = $.turn.step({ turnId: 't1', index: 0, model: 'claude-opus-5-5', messageCount: 1, agentId: 'a1' })
+  for await (const _ of step) { /* Stream leeren */ }
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /Sonnet 5\.5/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Opus 5\.5/ })).toBeUndefined()
+  await ui.unmount()
+})
+
 test('Restzeit aus früheren Läufen desselben Typs, jeder fertige Lauf wird gelernt', async ($, on) => {
   const clock = mock.clock(on)
   // Drei frühere Explore-Läufe mit Haiku: üblich sind 2:00.

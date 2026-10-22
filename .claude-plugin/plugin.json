@@ -1,6 +1,6 @@
 {
   "name": "agenten-monitor",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Zeigt je Subagent eine Fortschrittsleiste, die aktuelle Aufgabe und eine gelernte Restzeit in einem Pane",
   "types": "./types/index.d.ts"
 }
