@@ -236,6 +236,17 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // Ein Router kann das Modell je Schritt umleiten; gezeigt wird, welches wirklich geantwortet hat.
+  on('turn.step', async function* ($, e, next) {
+    const result = yield* next(e)
+    const model = result.usage?.model
+    if (e.agentId !== undefined && model !== undefined) {
+      await update($, agents, patch(e.agentId, row => (row.model === model ? row : { ...row, model })))
+    }
+
+    return result
+  })
+
   on('turn.complete', async ($, e, next) => {
     const isDone = e.reason === 'answer'
     if (e.agentId !== undefined) {
